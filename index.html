@@ -107,12 +107,15 @@
       </div>
 
       <div class="card">
-        <h2>Bán kính vòng phủ</h2>
+        <h2>Bán kính vùng phủ</h2>
         <div class="radius-row">
           <button class="radius-btn" data-r="150">150 m</button>
           <button class="radius-btn active" data-r="200">200 m</button>
           <button class="radius-btn" data-r="300">300 m</button>
         </div>
+        <div class="legend-item" style="margin-top:10px;"><span class="dot" style="background:#22c55e"></span> 150m (trong cùng)</div>
+        <div class="legend-item"><span class="dot" style="background:#eab308"></span> 200m (vòng giữa)</div>
+        <div class="legend-item"><span class="dot" style="background:#ef4444"></span> 300m (vòng ngoài)</div>
       </div>
 
       <div class="card">
@@ -150,6 +153,13 @@ const WARDS = ["Phường An Hội Tây", "Phường An Hội Đông", "Phườn
 
 const COLOR_ON = '#22c55e';
 const COLOR_ON1 = '#f59e0b';
+
+// Nested radius rings: innermost = green, middle band = yellow, outer band = red
+const RADIUS_LEVELS = [
+  { r: 150, color: '#22c55e' }, // xanh lá
+  { r: 200, color: '#eab308' }, // vàng
+  { r: 300, color: '#ef4444' }  // đỏ
+];
 
 let currentRadius = 200;
 let currentWard = '__all__';
@@ -205,10 +215,12 @@ function buildMarkers(){
     const marker = L.circleMarker([site.lat, site.lon], {
       radius: 5, color: color, weight: 1.5, fillColor: color, fillOpacity: 0.9
     }).bindPopup(popupHtml(site));
-    const circle = L.circle([site.lat, site.lon], {
-      radius: currentRadius, color: color, weight: 1, fillColor: color, fillOpacity: 0.08
-    }).bindPopup(popupHtml(site));
-    markerRefs.push({ site, marker, circle });
+    // One circle per radius level (150/200/300), drawn largest-to-smallest so
+    // the bands show through: green core, yellow ring, red ring.
+    const circles = RADIUS_LEVELS.map(level => L.circle([site.lat, site.lon], {
+      radius: level.r, color: level.color, weight: 1, fillColor: level.color, fillOpacity: 0.18
+    }).bindPopup(popupHtml(site)));
+    markerRefs.push({ site, marker, circles });
   });
 }
 buildMarkers();
@@ -218,17 +230,26 @@ function passesFilter(site){
   return true;
 }
 
+function levelIndexForRadius(r){
+  const idx = RADIUS_LEVELS.findIndex(l => l.r === r);
+  return idx === -1 ? RADIUS_LEVELS.length - 1 : idx;
+}
+
 function rebuildLayers(){
   clusterGroup.clearLayers();
   plainMarkerLayer.clearLayers();
   circleLayer.clearLayers();
-  markerRefs.forEach(({site, marker, circle}) => {
+  const maxIdx = levelIndexForRadius(currentRadius);
+  markerRefs.forEach(({site, marker, circles}) => {
     if (!passesFilter(site)) return;
     if (useCluster) clusterGroup.addLayer(marker);
     else plainMarkerLayer.addLayer(marker);
     if (showCircles){
-      circle.setRadius(currentRadius);
-      circleLayer.addLayer(circle);
+      // Add from the largest visible level down to the smallest, so smaller
+      // (inner) circles render on top of larger (outer) ones.
+      for (let i = maxIdx; i >= 0; i--){
+        circleLayer.addLayer(circles[i]);
+      }
     }
   });
   document.getElementById('siteCountSub').textContent =
