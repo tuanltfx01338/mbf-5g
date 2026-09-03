@@ -167,8 +167,8 @@ let showCircles = true, useCluster = true;
 
 const map = L.map('map', { zoomControl: true, preferCanvas: true }).setView([10.85, 106.65], 11);
 
-const osmLayer = L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png', {
-  maxZoom: 20, subdomains: 'abcd', detectRetina: true, attribution: '&copy; OpenStreetMap &copy; CARTO'
+const osmLayer = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}', {
+  maxZoom: 19, attribution: 'Tiles &copy; Esri &mdash; Source: Esri, DeLorme, NAVTEQ'
 });
 const osmLayerFallback = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
   maxZoom: 19, attribution: '&copy; OpenStreetMap'
