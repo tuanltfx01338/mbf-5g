@@ -121,6 +121,13 @@ button,input,select,textarea{font:inherit;color:inherit;}
 .sp-cell i{font-style:normal;font-size:13px;font-weight:600;color:var(--ink-2);margin-left:4px;}
 .sp-note{margin-top:10px;font-size:12.5px;line-height:1.45;color:var(--ink-2);}
 .rp-spd{font-weight:600;}
+.sp-facts{margin:12px 0 0;display:grid;grid-template-columns:auto 1fr;gap:4px 14px;font-size:13.5px;}
+.sp-facts dt{color:var(--ink-2);font-weight:500;}
+.sp-facts dd{margin:0;font-weight:700;}
+.ob-ctl{display:flex;align-items:center;flex-wrap:wrap;gap:6px;margin-top:12px;font-size:13.5px;}
+.ob-ctl span{color:var(--ink-2);font-weight:500;margin-right:6px;}
+.ob-btn{min-height:36px;padding:0 12px;border-radius:999px;border:2px solid var(--line);background:var(--paper);color:inherit;font:inherit;font-weight:700;cursor:pointer;}
+.ob-btn.active{background:var(--brand);color:var(--brand-ink);border-color:var(--brand);}
 .facts{margin:14px 2px 0;display:grid;grid-template-columns:auto 1fr;gap:6px 16px;font-size:14px;}
 .facts dt{color:var(--ink);font-weight:500;} .facts dd{margin:0;font-weight:700;word-break:break-word;}
 .v-warn,.chk-warn{margin-top:12px;padding:11px 13px;border-radius:var(--r-s);background:rgba(224,161,0,.18);color:var(--amber-d);font-size:13.5px;line-height:1.5;font-weight:600;}
@@ -353,14 +360,49 @@ const SPEED_MODEL = {
   peak: { '38-64': 1000, '38-32': 800, '26-64': 600, '26-32': 500, '26-8': 350, '26-4': 250 },
   // CA liên băng 2600+3800: sóng mang phụ không cộng đủ 100% vì chia công suất UE, CQI hai băng lệch nhau và scheduler
   caSecondary: 0.85,
-  indoor: { 38: 0.45, 26: 0.6 },
   // hệ số theo khoảng cách (m); 3800 MHz suy hao nhanh hơn 2600 MHz
   dist: { 38: [[0, 0.9], [150, 0.7], [200, 0.55], [300, 0.35]], 26: [[0, 0.9], [150, 0.75], [200, 0.62], [300, 0.42]] },
   // beamforming gain: Massive MIMO hơn 8T8R khoảng 3 dB (~20% tầm phủ), nên cùng khoảng cách thì trạm nhiều T giữ tốc độ tốt hơn
   reach: { 64: 1.2, 32: 1.1, 8: 1, 4: 0.9 },
+  // azimuth chuẩn của mạng, áp cho mọi trạm vì dữ liệu không có azimuth từng sector
+  azimuths: [30, 150, 270],
+  // mức giảm tốc độ ở biên sector (lệch 60° so với hướng búp chính); Massive MIMO lái búp theo UE nên giảm ít hơn anten búp cố định
+  sectorEdgeLoss: { 64: 0.3, 32: 0.3, 8: 0.45, 4: 0.45 },
+  // cell chia tài nguyên cho nhiều thuê bao, một CPE không dùng trọn sóng mang
+  load: 0.7,
+  // nhiễu đồng kênh từ trạm lân cận: đếm số trạm khác trong INTERF_RADIUS_M quanh điểm khách hàng
+  interference: [
+    { max: 1, k: 1, label: 'Thấp' },
+    { max: 4, k: 0.8, label: 'Trung bình' },
+    { max: 9, k: 0.62, label: 'Cao' },
+    { max: Infinity, k: 0.5, label: 'Rất cao' }
+  ],
+  // che chắn: out là hệ số ngoài trời, in là hệ số trong nhà theo băng (đã gồm suy hao xuyên tường)
+  // mức 'tb' cân theo số đo 11/2026 tại Tây Thạnh: CPE trong nhà ~100 Mbps, trạm NR38 32T cách 123 m, 7 trạm lân cận
+  obstruction: {
+    thoang: { label: 'Thoáng', out: 1, in: { 38: 0.55, 26: 0.7 } },
+    tb: { label: 'Nhà phố', out: 0.8, in: { 38: 0.42, 26: 0.55 } },
+    day: { label: 'Dày', out: 0.55, in: { 38: 0.2, 26: 0.3 } }
+  },
   spread: 0.15,
   defaultT: 32
 };
+const INTERF_RADIUS_M = 500;
+let obstructionLevel = 'tb';
+function bearingDeg(lat1, lon1, lat2, lon2){
+  const r = Math.PI / 180, dLon = (lon2 - lon1) * r;
+  const y = Math.sin(dLon) * Math.cos(lat2 * r), x = Math.cos(lat1 * r) * Math.sin(lat2 * r) - Math.sin(lat1 * r) * Math.cos(lat2 * r) * Math.cos(dLon);
+  return (Math.atan2(y, x) / r + 360) % 360;
+}
+// sector phủ điểm khách hàng: azimuth gần hướng trạm→khách nhất, off là góc lệch 0..60°
+function sectorToward(site, lat, lon){
+  const brg = bearingDeg(site.lat, site.lon, lat, lon);
+  let az = 0, off = 360;
+  SPEED_MODEL.azimuths.forEach(a => { const d = Math.abs((brg - a + 540) % 360 - 180); if (d < off){ off = d; az = a; } });
+  return { az: az, off: off };
+}
+function sectorFactor(t, off){ return 1 - (SPEED_MODEL.sectorEdgeLoss[t] || 0.3) * Math.pow(Math.min(off, 60) / 60, 2); }
+function interferenceFor(nearbySites){ return SPEED_MODEL.interference.find(x => nearbySites <= x.max); }
 function techLayers(t){
   const out = []; let band = 38;
   String(t || '5G 3800').split('+').forEach(p => {
@@ -376,21 +418,23 @@ function distFactor(band, d){
   return a[a.length - 1][1];
 }
 // Mỗi băng lấy lớp tốt nhất (hai radio cùng băng thường là khác sector, không CA); khác băng thì cộng theo CA.
-function siteRate(site, dist, indoor){
-  const byBand = {};
+function siteRate(site, dist, indoor, nearbySites, off){
+  const ob = SPEED_MODEL.obstruction[obstructionLevel], byBand = {};
   techLayers(site.t).forEach(l => {
     const peak = SPEED_MODEL.peak[l.band + '-' + l.t] || SPEED_MODEL.peak[l.band + '-' + SPEED_MODEL.defaultT];
-    const rate = peak * distFactor(l.band, dist / (SPEED_MODEL.reach[l.t] || 1)) * (indoor ? SPEED_MODEL.indoor[l.band] : 1);
+    const rate = peak * distFactor(l.band, dist / (SPEED_MODEL.reach[l.t] || 1)) * sectorFactor(l.t, off) * (indoor ? ob.in[l.band] : ob.out);
     byBand[l.band] = Math.max(byBand[l.band] || 0, rate);
   });
   const rates = Object.values(byBand).sort((x, y) => y - x);
-  return rates[0] + SPEED_MODEL.caSecondary * rates.slice(1).reduce((s, v) => s + v, 0);
+  const radio = rates[0] + SPEED_MODEL.caSecondary * rates.slice(1).reduce((s, v) => s + v, 0);
+  return radio * SPEED_MODEL.load * interferenceFor(nearbySites).k;
 }
-function estimateSpeed(site, dist){
+function estimateSpeed(site, dist, nearbySites, sector){
   const k = SPEED_MODEL.spread, r10 = v => Math.round(v / 10) * 10;
   const mk = v => ({ mid: r10(v), lo: r10(v * (1 - k)), hi: r10(v * (1 + k)) });
   const ca = new Set(techLayers(site.t).map(l => l.band)).size > 1;
-  return { tech: site.t || '5G 3800', ca: ca, site: site, dist: dist, out: mk(siteRate(site, dist, false)), in: mk(siteRate(site, dist, true)) };
+  return { tech: site.t || '5G 3800', ca: ca, site: site, dist: dist, sector: sector, nearbySites: nearbySites, interference: interferenceFor(nearbySites).label,
+    out: mk(siteRate(site, dist, false, nearbySites, sector.off)), in: mk(siteRate(site, dist, true, nearbySites, sector.off)) };
 }
 function fmtRange(x){ return x.lo + '–' + x.hi; }
 function checkPoint(lat, lon, sites){
@@ -398,7 +442,7 @@ function checkPoint(lat, lon, sites){
   const M_PER_DEG = 111194.93, cosLat = Math.cos(lat * Math.PI / 180);
   let best = null, bd2 = Infinity;
   const near = [];
-  const lim2 = 260 * 260;
+  const lim2 = (INTERF_RADIUS_M + 60) * (INTERF_RADIUS_M + 60);
   for (const s of sites){
     const dy = (s.lat - lat) * M_PER_DEG, dx = (s.lon - lon) * cosLat * M_PER_DEG;
     const d2 = dx * dx + dy * dy;
@@ -407,14 +451,17 @@ function checkPoint(lat, lon, sites){
   }
   if (!best) return { covered: false, site: null, dist: Infinity, within: 0 };
   const dist = haversineM(lat, lon, best.lat, best.lon);
-  let within = 0, speed = null;
+  let within = 0, inInterfRange = 0, serving = null;
   for (const s of near){
     const d = haversineM(lat, lon, s.lat, s.lon);
+    if (d <= INTERF_RADIUS_M) inInterfRange++;
     if (d > COVERAGE_M) continue;
     within++;
-    const e = estimateSpeed(s, d); // nhiều trạm cùng phủ: lấy trạm cho tốc độ ngoài trời cao nhất
-    if (!speed || e.out.mid > speed.out.mid) speed = e;
+    // trạm phục vụ: tín hiệu mạnh nhất theo khoảng cách và góc lệch sector, không xét cấu hình
+    const sector = sectorToward(s, lat, lon), signal = distFactor(38, d) * sectorFactor(32, sector.off);
+    if (!serving || signal > serving.signal) serving = { site: s, dist: d, sector: sector, signal: signal };
   }
+  const speed = serving ? estimateSpeed(serving.site, serving.dist, inInterfRange - 1, serving.sector) : null;
   return { covered: dist <= COVERAGE_M, site: best, dist, within, speed };
 }
 
@@ -729,8 +776,7 @@ function siteInfoHtml(s){
     + '<div class="iw-row"><b>Phường/Xã:</b> ' + escHtml(s.w || 'Chưa xác định') + '</div>'
     + '<div class="iw-row"><b>Toạ độ:</b> ' + s.lat + ', ' + s.lon + '</div>'
     + '<div class="iw-row"><b>Trạng thái:</b> <span style="color:' + color + ';font-weight:700">' + escHtml(s.s) + '</span></div>'
-    + '<div class="iw-row"><b>Công nghệ 5G:</b> ' + escHtml(s.t || '5G 3800') + '</div>'
-    + '<div class="iw-row"><b>Tốc độ đỉnh ước tính:</b> ngoài trời ~' + Math.round(siteRate(s, 0, false)) + ', trong nhà ~' + Math.round(siteRate(s, 0, true)) + ' Mbps</div>';
+    + '<div class="iw-row"><b>Công nghệ 5G:</b> ' + escHtml(s.t || '5G 3800') + '</div>';
 }
 
 
@@ -1212,7 +1258,7 @@ function resultInfoHtml(r){
   if (r.lat != null) h += '<div class="iw-row"><b>Toạ độ:</b> ' + r.lat.toFixed(6) + ', ' + r.lon.toFixed(6) + '</div>';
   h += '<div class="iw-row"><b>Kết quả:</b> <span style="color:' + PIN_COLOR[r.status] + ';font-weight:700">' + STATUS_TEXT[r.status] + '</span></div>';
   if (r.site) h += '<div class="iw-row"><b>Trạm gần nhất:</b> ' + escHtml(siteLabel(r.site)) + ' — ' + fmtDist(r.dist) + '</div>';
-  if (r.speed) h += '<div class="iw-row"><b>Công nghệ 5G:</b> ' + escHtml(r.speed.tech) + (r.speed.ca ? ' (CA)' : '') + '</div><div class="iw-row"><b>Tốc độ dự kiến:</b> ngoài trời ' + fmtRange(r.speed.out) + ', trong nhà ' + fmtRange(r.speed.in) + ' Mbps</div>';
+  if (r.speed) h += '<div class="iw-row"><b>Công nghệ 5G:</b> ' + escHtml(r.speed.tech) + (r.speed.ca ? ' (CA)' : '') + '</div><div class="iw-row"><b>Mức nhiễu:</b> ' + r.speed.interference + '</div><div class="iw-row"><b>Tốc độ dự kiến:</b> ngoài trời ' + fmtRange(r.speed.out) + ', trong nhà ' + fmtRange(r.speed.in) + ' Mbps</div>';
   if (r.note) h += '<div class="iw-row" style="color:#b45309">' + escHtml(r.note) + '</div>';
   return h;
 }
@@ -1273,6 +1319,17 @@ function signalBars(r){
   if (r.status === 'no') return r.dist <= 300 ? 1 : 0;
   return 0;
 }
+function obstructionCtl(){
+  return '<div class="ob-ctl" role="group" aria-label="Mức che chắn"><span>Che chắn</span>' + Object.keys(SPEED_MODEL.obstruction).map(k =>
+    '<button type="button" class="ob-btn' + (k === obstructionLevel ? ' active' : '') + '" data-ob="' + k + '" aria-pressed="' + (k === obstructionLevel) + '">' + SPEED_MODEL.obstruction[k].label + '</button>').join('') + '</div>';
+}
+function setObstruction(level){
+  obstructionLevel = level;
+  checkResults.forEach(r => { if (r.speed) r.speed = estimateSpeed(r.speed.site, r.speed.dist, r.speed.nearbySites, r.speed.sector); });
+  if (checkResults.length === 1) renderSingle(checkResults[0]);
+  else { renderBatchSummary(lastSkipped); renderPanel(); }
+}
+let lastSkipped = 0;
 function renderSingle(r){
   const cls = STATUS_CLASS[r.status], n = signalBars(r);
   let sub = '';
@@ -1282,11 +1339,16 @@ function renderSingle(r){
     + [1, 2, 3, 4].map(i => '<i' + (i <= n ? ' class="on"' : '') + '></i>').join('') + '</div>'
     + '<div><div class="v-title">' + STATUS_TEXT[r.status] + '</div><div class="v-sub">' + sub + '</div></div></div>';
   if (r.speed){
-    const sp = r.speed, other = sp.site !== r.site ? ' (trạm ' + escHtml(sp.site.n || sp.site.o) + ', cách ' + fmtDist(sp.dist) + ')' : '';
+    const sp = r.speed;
     h += '<div class="speed"><div class="sp-head">Tốc độ tải xuống dự kiến</div><div class="sp-grid">'
       + '<div class="sp-cell"><span>Ngoài trời</span><b>' + fmtRange(sp.out) + '</b><i>Mbps</i></div>'
       + '<div class="sp-cell"><span>Trong nhà</span><b>' + fmtRange(sp.in) + '</b><i>Mbps</i></div></div>'
-      + '<div class="sp-note">Công nghệ ' + escHtml(sp.tech) + (sp.ca ? ', cộng gộp 2 băng (CA)' : '') + other + '. Ước tính theo cấu hình trạm và khoảng cách, tốc độ thực tế còn tùy thiết bị, gói cước, tải mạng và vật cản.</div></div>';
+      + '<dl class="sp-facts"><dt>Công nghệ</dt><dd>' + escHtml(sp.tech) + (sp.ca ? ', CA 2 băng' : '') + '</dd>'
+      + (sp.site !== r.site ? '<dt>Trạm phục vụ</dt><dd>' + escHtml(sp.site.n || sp.site.o) + ', cách ' + fmtDist(sp.dist) + '</dd>' : '')
+      + '<dt>Sector</dt><dd>Azimuth ' + sp.sector.az + '°, lệch ' + Math.round(sp.sector.off) + '°</dd>'
+      + '<dt>Mức nhiễu</dt><dd>' + sp.interference + ', ' + sp.nearbySites + ' trạm khác trong ' + INTERF_RADIUS_M + ' m</dd></dl>'
+      + obstructionCtl()
+      + '<div class="sp-note">Ước tính theo cấu hình trạm, khoảng cách, hướng sector (azimuth chuẩn 30/150/270), tải mạng, nhiễu và che chắn. Tốc độ thực tế còn tùy thiết bị, gói cước và vị trí đặt CPE.</div></div>';
   }
   let f = '';
   if (r.lat != null){
@@ -1303,11 +1365,13 @@ function renderSingle(r){
 }
 
 function renderBatchSummary(skipped){
+  lastSkipped = skipped;
   const c = counts();
   let h = '<div class="v-title" style="font-size:22px">' + c.yes + ' trên ' + c.all + ' điểm có sóng 5G</div>';
   h += '<div class="chk-line" style="margin-top:6px">' + (lastSource ? 'Từ file ' + escHtml(lastSource) + '. ' : '') + c.no + ' điểm chưa có trạm phục vụ' + (c.unk ? ', ' + c.unk + ' điểm không xác định được vị trí' : '') + '.</div>';
   h += '<div class="sig-grid" role="list">' + checkResults.map(r =>
     '<button type="button" role="listitem" class="sig-cell ' + STATUS_CLASS[r.status] + '" data-i="' + r.idx + '" title="' + escHtml((r.name || r.input || 'Điểm ' + r.idx) + ': ' + STATUS_TEXT[r.status]) + '"><b>' + r.idx + '</b>' + miniBars(r) + '</button>').join('') + '</div>';
+  if (c.yes) h += obstructionCtl();
   if (skipped) h += '<div class="chk-line">Bỏ qua ' + skipped + ' dòng không nhận diện được toạ độ hoặc địa chỉ (tiêu đề, dòng trống…)</div>';
   h += '<button class="btn wide" id="reopenPanel" type="button" style="margin-top:12px;">Mở bảng kết quả</button>';
   byId('checkStatus').innerHTML = h;
@@ -1355,7 +1419,7 @@ async function processRecords(records, skipped){
     }
     if (r.lat != null){
       const c = checkPoint(r.lat, r.lon, SITES);
-      r.site = c.site; r.dist = c.dist; r.within = c.within; r.speed = c.covered ? c.speed : null;
+      r.site = c.site; r.dist = c.dist; r.within = c.within; r.speed = c.speed;
       r.status = c.covered ? 'yes' : 'no';
     }
     checkResults.push(r);
@@ -1427,13 +1491,13 @@ async function handleFile(file){
 // ---- Xuất kết quả ----
 async function exportResults(){
   if (!checkResults.length) return;
-  const header = ['STT', 'Tên', 'Địa chỉ / đầu vào', 'Vĩ độ', 'Kinh độ', 'Kết quả', 'Trạm 5G gần nhất', 'Phường/Xã của trạm', 'Khoảng cách (m)', 'Số trạm trong ' + COVERAGE_M + ' m', 'Công nghệ 5G', 'Tốc độ ngoài trời dự kiến (Mbps)', 'Tốc độ trong nhà dự kiến (Mbps)', 'Ghi chú'];
+  const header = ['STT', 'Tên', 'Địa chỉ / đầu vào', 'Vĩ độ', 'Kinh độ', 'Kết quả', 'Trạm 5G gần nhất', 'Phường/Xã của trạm', 'Khoảng cách (m)', 'Số trạm trong ' + COVERAGE_M + ' m', 'Trạm phục vụ', 'Công nghệ 5G', 'Azimuth sector', 'Góc lệch (°)', 'Mức nhiễu', 'Trạm khác trong ' + INTERF_RADIUS_M + ' m', 'Che chắn', 'Tốc độ ngoài trời dự kiến (Mbps)', 'Tốc độ trong nhà dự kiến (Mbps)', 'Ghi chú'];
   const rows = checkResults.map(r => [r.idx, r.name, r.input, r.lat != null ? +r.lat.toFixed(6) : '', r.lon != null ? +r.lon.toFixed(6) : '',
-    STATUS_TEXT[r.status], r.site ? (r.site.n || r.site.o) : '', r.site ? r.site.w : '', r.site ? Math.round(r.dist) : '', r.within != null ? r.within : '', r.speed ? r.speed.tech : '', r.speed ? r.speed.out.mid : '', r.speed ? r.speed.in.mid : '', r.note]);
+    STATUS_TEXT[r.status], r.site ? (r.site.n || r.site.o) : '', r.site ? r.site.w : '', r.site ? Math.round(r.dist) : '', r.within != null ? r.within : '', r.speed ? (r.speed.site.n || r.speed.site.o) : '', r.speed ? r.speed.tech : '', r.speed ? r.speed.sector.az : '', r.speed ? Math.round(r.speed.sector.off) : '', r.speed ? r.speed.interference : '', r.speed ? r.speed.nearbySites : '', r.speed ? SPEED_MODEL.obstruction[obstructionLevel].label : '', r.speed ? r.speed.out.mid : '', r.speed ? r.speed.in.mid : '', r.note]);
   try {
     const X = await ensureLib('XLSX');
     const ws = X.utils.aoa_to_sheet([header].concat(rows));
-    ws['!cols'] = [6, 24, 40, 11, 11, 26, 18, 22, 14, 14, 24, 16, 16, 50].map(w => ({ wch: w }));
+    ws['!cols'] = [6, 24, 40, 11, 11, 26, 18, 22, 14, 14, 16, 24, 10, 10, 12, 14, 14, 16, 16, 50].map(w => ({ wch: w }));
     const wb = X.utils.book_new();
     X.utils.book_append_sheet(wb, ws, 'Ket qua');
     X.writeFile(wb, 'ket_qua_kiem_tra_5G.xlsx');
@@ -1525,6 +1589,7 @@ byId('keyReset').addEventListener('click', () => { byId('keyInput').value = ''; 
 
 // ---- Gắn sự kiện kiểm tra ----
 byId('checkBtn').addEventListener('click', runFromInput);
+byId('checkStatus').addEventListener('click', e => { const b = e.target.closest('.ob-btn'); if (b) setObstruction(b.dataset.ob); });
 byId('checkInput').addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey){ e.preventDefault(); runFromInput(); } });
 byId('checkFile').addEventListener('change', e => { const f = e.target.files[0]; e.target.value = ''; if (f) handleFile(f); });
 byId('checkClear').addEventListener('click', () => { checkRunId++; clearCheckResults(); byId('checkInput').value = ''; });
